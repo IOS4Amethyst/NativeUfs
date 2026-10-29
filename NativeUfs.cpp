@@ -1001,11 +1001,6 @@ static uint32_t be32w (const uint8_t *at)
 // lets the consumer inspect its header. Mode 2 additionally opens the write window. A window is refused unless it lies inside
 // the partition, clear of the flashed root image plus a 4 MiB guard, and is at most a quarter of the partition.
 namespace {
-struct StoreGeometry {
-  bool valid;
-  uint64_t first, last, imageBytes, entriesLba;
-  uint32_t headerCrc, entriesCrc, entryCount;
-};
 StoreGeometry gStoreGeometry;
 uint64_t gStoreRegionFirst, gStoreRegionBlocks;
 // The diagnostic log (sheng-log=1): always the last 32 MiB of userdata, so the Data store's place does not depend on logging.
@@ -2004,6 +1999,7 @@ bool NativeUfs::start (IOService *provider)
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
 bool NativeUfs::startRoot (IOService *provider)
 {
+  gStoreGeometry = {};
   const char *why = "";
   native_ufs_root_step = 1;
   if (!hostBringUp (&why)) {
@@ -2028,8 +2024,9 @@ bool NativeUfs::startRoot (IOService *provider)
     IOFree (layout, sizeof (RootLayout));
     return false;
   }
-  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
-                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
+  gStoreGeometry = rootStoreGeometry (*layout);
+  if (layout->rootIsUnixnu)
+    IOLog ("NativeUfs: split device: Data persistence and log/export disabled; no validated storage region\n");
   const char *names[4] = {};
   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {

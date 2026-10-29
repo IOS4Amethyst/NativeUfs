@@ -10,8 +10,7 @@ struct RootWindow {
 };
 
 struct RootLayout {
-  // Android's userdata. sheng's Data store and diagnostic log are anchored to
-  // the END of this partition, so it must never be the unixnu partition.
+  // Android's userdata bounds, not permission to write inside its filesystem.
   uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
   // The partition that carries the root image manifest and its windows: unixnu
   // when a split exists, otherwise userdata itself. RootWindow.offset is
@@ -28,6 +27,21 @@ struct RootLayout {
   uint32_t ext4Magic;                     // 16 bits at byte 1080 of the partition (0xef53 on Linux ext4)
   uint32_t ext4Blocks;                    // s_blocks_count_lo at byte 1028
 };
+
+struct StoreGeometry {
+  bool valid;
+  uint64_t first, last, imageBytes, entriesLba;
+  uint32_t headerCrc, entriesCrc, entryCount;
+};
+
+static inline StoreGeometry rootStoreGeometry (const RootLayout &layout)
+{
+  // ponytail: split-device persistence is disabled until a dedicated region
+  // outside Android F2FS has independently validated bounds and ownership.
+  if (layout.rootIsUnixnu || layout.manifestStatus != 0) return {};
+  return { true, layout.rootFirst, layout.rootLast, layout.imageBytes, layout.gptEntriesLba,
+           layout.gptHeaderCrc, layout.gptEntriesCrc, layout.gptEntryCount };
+}
 
 static uint8_t gScratch[kDataMax];
 

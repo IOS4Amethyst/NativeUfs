@@ -115,6 +115,11 @@ int main(int argc,char **argv) {
     assert(findRootLayout(&layout,&why) && layout.manifestStatus==0);
     assert(!layout.rootIsUnixnu);
     assert(layout.rootFirst==layout.userdataFirst && layout.rootLast==layout.userdataLast);
+    const StoreGeometry store = rootStoreGeometry(layout);
+    assert(store.valid && store.first==layout.rootFirst && store.last==layout.rootLast);
+    assert(store.imageBytes==layout.imageBytes);
+    layout.manifestStatus=1;
+    assert(!rootStoreGeometry(layout).valid);
   }
   // Split device: unixnu carries the root image, userdata keeps its own block 0.
   // sheng's store anchor must stay on userdata, never move to unixnu.
@@ -127,6 +132,8 @@ int main(int argc,char **argv) {
     assert(layout.rootFirst==300 && layout.rootLast==506);
     assert(layout.userdataFirst==8 && layout.userdataLast==299);
     assert(layout.rootFirst!=layout.userdataFirst);
+    const StoreGeometry store = rootStoreGeometry(layout);
+    assert(!store.valid && store.first==0 && store.last==0 && store.imageBytes==0);
     // The manifest decoded from unixnu, not the "ANDROID!" block in userdata.
     assert(layout.windows==2 && !strcmp(layout.window[0].name,"OS"));
   }
@@ -187,5 +194,6 @@ int main(int argc,char **argv) {
            (unsigned long long)layout.window[0].size,(unsigned long long)layout.window[1].size);
   }
   puts("PASS: GPT CRC/geometry/partition faults, manifest hashes/names/attributes/overlap/overflow, "
-       "unixnu root with userdata fallback and store anchor, 2048 bounded mutations");
+       "unixnu root with userdata fallback and split persistence disabled, 2048 bounded mutations");
+  return 0;
 }
