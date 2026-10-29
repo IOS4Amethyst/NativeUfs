@@ -10,7 +10,14 @@ struct RootWindow {
 };
 
 struct RootLayout {
+  // Android's userdata. sheng's Data store and diagnostic log are anchored to
+  // the END of this partition, so it must never be the unixnu partition.
   uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
+  // The partition that carries the root image manifest and its windows: unixnu
+  // when a split exists, otherwise userdata itself. RootWindow.offset is
+  // relative to rootFirst.
+  uint64_t rootFirst, rootLast;
+  bool rootIsUnixnu;
   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
@@ -103,8 +110,12 @@ static bool findRootLayout (RootLayout *layout, const char **why)
     *why = "GPT entries CRC";
     return false;
   }
-  static const char wanted[] = "userdata";
-  bool found = false;
+  // Find Android's userdata (sheng's store anchor) and the root partition. The
+  // root lives in a separate "unixnu" partition when the device is split for
+  // dual boot, and in userdata itself otherwise.
+  static const char kUserdata[] = "userdata";
+  static const char kUnixnu[] = "unixnu";
+  bool foundUserdata = false, foundUnixnu = false;
   for (uint32_t index = 0; index < count; index++) {
     const uint8_t *entry = gScratch + index * 128;
     if (!rootEntryUsed (entry)) continue;
@@ -120,33 +131,50 @@ static bool findRootLayout (RootLayout *layout, const char **why)
         return false;
       }
     }
-    bool match = true;
-    for (unsigned c = 0; c < sizeof (wanted); c++) {
-      if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
-        match = false;
-        break;
+    // Partition names are UTF-16LE with a NUL terminator.
+    auto nameIs = [entry] (const char *wanted) {
+      for (unsigned c = 0; c < 36; c++) {
+        if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) return false;
+        if (!wanted[c]) return true;
       }
-    }
-    if (match) {
-      if (found) {
+      return false;
+    };
+    bool isUserdata = nameIs (kUserdata), isUnixnu = nameIs (kUnixnu);
+    if (isUserdata) {
+      if (foundUserdata) {
         *why = "duplicate userdata partition";
         return false;
       }
-      layout->userdataFirst = le64 (entry + 32);
-      layout->userdataLast = le64 (entry + 40);
-      found = true;
+      layout->userdataFirst = entryFirst;
+      layout->userdataLast = entryLast;
+      foundUserdata = true;
+    }
+    if (isUnixnu) {
+      if (foundUnixnu) {
+        *why = "duplicate unixnu partition";
+        return false;
+      }
+      layout->rootFirst = entryFirst;
+      layout->rootLast = entryLast;
+      foundUnixnu = true;
     }
   }
-  if (!found || layout->userdataLast < layout->userdataFirst) {
+  if (!foundUserdata || layout->userdataLast < layout->userdataFirst) {
     *why = "no userdata partition";
     return false;
+  }
+  // unixnu wins when present; userdata is the unsplit fallback.
+  layout->rootIsUnixnu = foundUnixnu;
+  if (!foundUnixnu) {
+    layout->rootFirst = layout->userdataFirst;
+    layout->rootLast = layout->userdataLast;
   }
   gRootDiagnostic.first = layout->userdataFirst;
   gRootDiagnostic.last = layout->userdataLast;
   gRootDiagnostic.stage = "root manifest";
-  // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
-    *why = "userdata first block read";
+  // First block of the root partition: manifest if the root image was flashed, ext4 otherwise.
+  if (hostRead4k (0, layout->rootFirst, 1, gScratch) != kIOReturnSuccess) {
+    *why = foundUnixnu ? "unixnu first block read" : "userdata first block read";
     return false;
   }
   layout->magic0 = le32 (gScratch);
@@ -166,7 +194,7 @@ static bool findRootLayout (RootLayout *layout, const char **why)
       SHA256_Final (digest, &context);
       layout->manifestStatus = 3;
       if (memcmp (digest, gScratch + 4064, 32) == 0) {
-        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
+        uint64_t partitionBytes = (layout->rootLast - layout->rootFirst + 1) * 4096ULL;
         layout->manifestStatus = 4;
         bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes;
         for (uint32_t index = 0; index < n && bounds; index++) {

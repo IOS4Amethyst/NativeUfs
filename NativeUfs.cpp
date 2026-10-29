@@ -1918,10 +1918,13 @@ bool NativeUfs::start (IOService *provider)
       panic ("NATIVE_UFS root check: %s", why);
     }
     panic ("NATIVE_UFS root check\n"
-           "userdata first=%llx last=%llx\n"
+           "userdata first=%llx last=%llx (sheng store anchor)\n"
+           "root=%s first=%llx last=%llx\n"
            "block0 magic %08x %08x ext4magic=%04x ext4blocks=%u\n"
            "manifest status=%u windows=%u",
-           layout->userdataFirst, layout->userdataLast, layout->magic0, layout->magic1,
+           layout->userdataFirst, layout->userdataLast,
+           layout->rootIsUnixnu ? "unixnu" : "userdata",
+           layout->rootFirst, layout->rootLast, layout->magic0, layout->magic1,
            layout->ext4Magic, layout->ext4Blocks, layout->manifestStatus, layout->windows);
   }
   if (probe == 11) {
@@ -1938,7 +1941,7 @@ bool NativeUfs::start (IOService *provider)
     uint32_t sig[4][2] = {};
     uint32_t seen[4] = {};
     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      uint64_t absolute = layout->rootFirst * 4096ULL + layout->window[index].offset;
       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
         seen[index] = 1;
         sig[index][0] = le32 (gScratch + 512);
@@ -1946,13 +1949,14 @@ bool NativeUfs::start (IOService *provider)
       }
     }
     panic ("NATIVE_UFS root windows\n"
-           "userdata first=%llx last=%llx manifest status=%u windows=%u\n"
+           "userdata first=%llx last=%llx store anchor; root=%s first=%llx last=%llx manifest status=%u windows=%u\n"
            "w0 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
            "w1 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
            "w0 sha %08x %08x %08x %08x\n"
            "w1 sha %08x %08x %08x %08x",
-           layout->userdataFirst, layout->userdataLast, layout->manifestStatus, layout->windows,
-           layout->window[0].name, layout->window[0].offset, layout->window[0].size, sig[0][0], sig[0][1], seen[0],
+           layout->userdataFirst, layout->userdataLast,
+           layout->rootIsUnixnu ? "unixnu" : "userdata", layout->rootFirst, layout->rootLast,
+           layout->manifestStatus, layout->windows, layout->window[0].name, layout->window[0].offset, layout->window[0].size, sig[0][0], sig[0][1], seen[0],
            layout->window[1].name, layout->window[1].offset, layout->window[1].size, sig[1][0], sig[1][1], seen[1],
            be32w (layout->window[0].sha256), be32w (layout->window[0].sha256 + 4), be32w (layout->window[0].sha256 + 8), be32w (layout->window[0].sha256 + 12),
            be32w (layout->window[1].sha256), be32w (layout->window[1].sha256 + 4), be32w (layout->window[1].sha256 + 8), be32w (layout->window[1].sha256 + 12));
@@ -2018,7 +2022,8 @@ bool NativeUfs::startRoot (IOService *provider)
   native_ufs_root_step = 3;
   if (layout->manifestStatus != 0) {
     rootDiagnosticFailure ("root manifest rejected");
-    IOLog ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
+    IOLog ("NativeUfs: no valid root manifest in %s (status %u, magic %08x %08x)\n",
+           layout->rootIsUnixnu ? "unixnu" : "userdata",
            layout->manifestStatus, layout->magic0, layout->magic1);
     IOFree (layout, sizeof (RootLayout));
     return false;
@@ -2052,7 +2057,7 @@ bool NativeUfs::startRoot (IOService *provider)
       gPendingDevice[index] = device;
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+      uint64_t absolute = layout->rootFirst * 4096ULL + layout->window[index].offset;
       if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
           !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
       gRootDiagnostic.stage = "root window attachment";

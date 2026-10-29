@@ -13,14 +13,19 @@ constexpr IOReturn kIOReturnSuccess=0;
 constexpr unsigned kDataMax=131072;
 static UfsRootDiagnostics gRootDiagnostic;
 static uint8_t header[4096],entries[16384],manifest[4096];
-static uint64_t userdata=8;
+// userdata is Android's partition and may hold its own (different) block 0 when a
+// separate unixnu partition carries the root image.
+static uint64_t userdata=8, unixnu=0;
+static uint8_t userdataBlock0[4096];
+static bool haveUnixnu;
 static unsigned reads;
 static bool failRead;
 static IOReturn hostRead4k(uint8_t,uint64_t lba,uint32_t blocks,void *out) {
   ++reads; if(failRead) return 1;
   if(lba==1 && blocks==1) memcpy(out,header,4096);
   else if(lba==2 && blocks<=4) memcpy(out,entries,blocks*4096);
-  else if(lba==userdata && blocks==1) memcpy(out,manifest,4096);
+  else if(haveUnixnu && lba==unixnu && blocks==1) memcpy(out,manifest,4096);
+  else if(lba==userdata && blocks==1) memcpy(out,haveUnixnu?userdataBlock0:manifest,4096);
   else { assert(false); }
   return 0;
 }
@@ -34,7 +39,8 @@ static void checksums() {
 }
 static void fixture() {
   memset(header,0,sizeof(header)); memset(entries,0,sizeof(entries)); memset(manifest,0,sizeof(manifest));
-  reads=0; failRead=false; userdata=8;
+  memset(userdataBlock0,0,sizeof(userdataBlock0));
+  reads=0; failRead=false; userdata=8; unixnu=0; haveUnixnu=false;
   memcpy(header,"EFI PART",8); put32(header+8,0x10000);put32(header+12,92);
   put64(header+24,1);put64(header+32,511);put64(header+40,6);put64(header+48,506);
   put64(header+72,2);put32(header+80,32);put32(header+84,128);
@@ -52,6 +58,20 @@ static void expect(const std::function<void()> &change,bool gpt,uint32_t status,
   bool result=findRootLayout(&layout,&why);
   assert(result==gpt);if(gpt)assert(layout.manifestStatus==status);
   if(!result || status)assert(layout.windows==0);
+}
+// Turn the fixture into a dual-boot device: userdata shrinks to entry 0 and a
+// separate "unixnu" partition (entry 1) carries the root manifest. userdata's
+// own first block holds something else, so the test proves the manifest was
+// read from unixnu and not from userdata.
+static void splitDevice() {
+  fixture();                                      // every case starts from a clean device
+  unixnu=300; haveUnixnu=true;
+  memset(userdataBlock0,0,sizeof(userdataBlock0));
+  memcpy(userdataBlock0,"ANDROID!",8);            // no root manifest here
+  put64(entries+40,299);                          // userdata 8..299
+  entries[128]=1; entries[128+16]=2;
+  put64(entries+128+32,300); put64(entries+128+40,506);   // unixnu 300..506
+  for(unsigned i=0;i<7;++i)entries[128+56+2*i]="unixnu"[i];
 }
 int main(int argc,char **argv) {
   assert(rootCrc32(reinterpret_cast<const uint8_t *>("123456789"),9)==0xcbf43926);
@@ -87,6 +107,69 @@ int main(int argc,char **argv) {
   expect([]{put32(manifest+24+52,0);},true,7);
   // A final physical 4K read may include padding, but cannot enter another window.
   expect([]{put64(manifest+24+40,4096+512);put64(manifest+24+128+32,8192);},true,6);
+  // ---- unixnu root with userdata fallback (dual boot) ---------------------
+  // Unsplit device: the manifest lives in userdata and userdata is the root.
+  {
+    fixture();
+    RootLayout layout;const char *why=nullptr;
+    assert(findRootLayout(&layout,&why) && layout.manifestStatus==0);
+    assert(!layout.rootIsUnixnu);
+    assert(layout.rootFirst==layout.userdataFirst && layout.rootLast==layout.userdataLast);
+  }
+  // Split device: unixnu carries the root image, userdata keeps its own block 0.
+  // sheng's store anchor must stay on userdata, never move to unixnu.
+  {
+    splitDevice(); checksums();
+    RootLayout layout;const char *why=nullptr;
+    assert(findRootLayout(&layout,&why));
+    assert(layout.manifestStatus==0 && layout.windows==2);
+    assert(layout.rootIsUnixnu);
+    assert(layout.rootFirst==300 && layout.rootLast==506);
+    assert(layout.userdataFirst==8 && layout.userdataLast==299);
+    assert(layout.rootFirst!=layout.userdataFirst);
+    // The manifest decoded from unixnu, not the "ANDROID!" block in userdata.
+    assert(layout.windows==2 && !strcmp(layout.window[0].name,"OS"));
+  }
+  // Windows are read relative to the root partition: userdataFirst + offset
+  // would land inside userdata and miss the image.
+  {
+    splitDevice(); checksums();
+    RootLayout layout;const char *why=nullptr;
+    assert(findRootLayout(&layout,&why) && layout.manifestStatus==0);
+    uint64_t absolute = layout.rootFirst*4096ULL + layout.window[0].offset;
+    assert(absolute >= layout.rootFirst*4096ULL);
+    assert(absolute < (layout.rootLast+1)*4096ULL);
+    assert(absolute != layout.userdataFirst*4096ULL + layout.window[0].offset);
+  }
+  // A split device whose unixnu block 0 is not a manifest still reports the
+  // partition choice, so a flashed-but-empty unixnu is distinguishable.
+  {
+    splitDevice(); memset(manifest,0,4096); checksums();
+    RootLayout layout;const char *why=nullptr;
+    assert(findRootLayout(&layout,&why));
+    assert(layout.rootIsUnixnu && layout.manifestStatus==1);
+  }
+  // Manifest bounds are checked against the root partition's own size: a
+  // unixnu smaller than userdata must not admit an oversized image.
+  {
+    splitDevice(); put64(manifest+16,(506-300+1)*4096ULL+4096); checksums();
+    RootLayout layout;const char *why=nullptr;
+    assert(findRootLayout(&layout,&why));
+    assert(layout.rootIsUnixnu && layout.manifestStatus==4);
+    assert(layout.windows==0);
+  }
+  // Duplicate unixnu entries are refused rather than silently picked.
+  {
+    splitDevice(); entries[256]=1; entries[256+16]=3;
+    put64(entries+256+32,507); put64(entries+256+40,510);
+    for(unsigned i=0;i<7;++i)entries[256+56+2*i]="unixnu"[i];
+    // Widen the disk so the third entry fits below the backup header:
+    // last_usable and backup must keep backup - last_usable > table blocks.
+    put64(header+48,520); put64(header+32,525);
+    checksums();
+    RootLayout layout;const char *why=nullptr;
+    assert(!findRootLayout(&layout,&why) && !strcmp(why,"duplicate unixnu partition"));
+  }
   // Bounded mutation pass checks parser memory safety, not semantic correctness.
   for(unsigned i=0;i<2048;++i) {
     fixture(); unsigned at=(i*313)%4064;manifest[at]^=uint8_t(1+(i%255));checksums();
@@ -103,5 +186,6 @@ int main(int argc,char **argv) {
     printf("PASS: existing root image's 4096-byte manifest, OS=%llu SystemOS=%llu; synthetic GPT uses recorded geometry, no full-image rehash\n",
            (unsigned long long)layout.window[0].size,(unsigned long long)layout.window[1].size);
   }
-  puts("PASS: GPT CRC/geometry/partition faults, manifest hashes/names/attributes/overlap/overflow, 2048 bounded mutations");
+  puts("PASS: GPT CRC/geometry/partition faults, manifest hashes/names/attributes/overlap/overflow, "
+       "unixnu root with userdata fallback and store anchor, 2048 bounded mutations");
 }
