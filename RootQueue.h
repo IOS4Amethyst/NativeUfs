@@ -13,6 +13,10 @@ static bool hostWaitRegister (unsigned offset, uint32_t mask, uint32_t value)
 
 static bool hostStopQueue (const char **why)
 {
+  if (gHost.poisoned) {
+    *why = "transport quarantined";
+    return false;
+  }
   // Confirm the firmware has no active transfer/task before changing its
   // request list or the storage stream's SMMU routing.
   if (!(read32 (gHost.hc, 0x34) & 1) || (read32 (gHost.hc, 0x30) & 0x0f) != 0x0f) {
@@ -33,6 +37,8 @@ static bool hostStopQueue (const char **why)
   hostWrite (0x24, 0);
   hostWrite (0x60, 0);
   if (!hostWaitRegister (0x60, 1, 0)) {
+    gHost.poisoned = true;
+    gHost.ready = false;
     recordTransport (kIOReturnTimeout, 15);
     *why = "request list stop";
     return false;
@@ -42,10 +48,16 @@ static bool hostStopQueue (const char **why)
 
 static bool hostStartQueue (const char **why)
 {
+  if (gHost.poisoned) {
+    *why = "transport quarantined";
+    return false;
+  }
   hostWrite (0x50, static_cast<uint32_t> (gHost.phys));
   hostWrite (0x54, static_cast<uint32_t> (gHost.phys >> 32));
   if (read32 (gHost.hc, 0x50) != uint32_t (gHost.phys) ||
-      read32 (gHost.hc, 0x54) != uint32_t (gHost.phys >> 32)) {
+       read32 (gHost.hc, 0x54) != uint32_t (gHost.phys >> 32)) {
+    gHost.poisoned = true;
+    gHost.ready = false;
     recordTransport (kIOReturnIOError, 15);
     *why = "request list address";
     return false;
@@ -54,6 +66,8 @@ static bool hostStartQueue (const char **why)
   hostWrite (0x20, gRootDiagnostic.isBefore);
   hostWrite (0x60, 1);
   if (!hostWaitRegister (0x60, 1, 1) || !hostWaitRegister (0x30, 3, 3)) {
+    gHost.poisoned = true;
+    gHost.ready = false;
     recordTransport (kIOReturnTimeout, 15);
     *why = "request list ready";
     return false;

@@ -12,6 +12,16 @@ failed mapping or an incompatible plan returns before queue writes. A second
 validation still occurs before SMMU configuration; failures after stopping the
 queue do not yet have a validated recovery/rollback path.
 
+Queue-stop timeout, descriptor-address readback failure and queue-start timeout
+quarantine the transport (`poisoned=true`, `ready=false`). Subsequent queue
+stop/start calls refuse before MMIO. This is fail-closed handling, not rollback.
+Host fault-injection check:
+
+```sh
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined tests/RootQueueFailure.cpp -o /path/to/owned-scratch/queue-failure
+/path/to/owned-scratch/queue-failure
+```
+
 ## Amethyst split-device safety
 
 When GPT contains `unixnu`, root reads use it, but persistent Data and
