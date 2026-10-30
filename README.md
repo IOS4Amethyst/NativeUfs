@@ -6,6 +6,12 @@ Current state: the native UFS root works on sheng.
 
 Linked into XNU by `unixnu build kernel`.
 
+Amethyst controller adoption is not hardware-qualified. Its board defaults keep
+root mode and probes off. A read-only SMMU plan now precedes firmware queue stop;
+failed mapping or an incompatible plan returns before queue writes. A second
+validation still occurs before SMMU configuration; failures after stopping the
+queue do not yet have a validated recovery/rollback path.
+
 ## Amethyst split-device safety
 
 When GPT contains `unixnu`, root reads use it, but persistent Data and
@@ -23,4 +29,5 @@ Host check (no hardware validation implied):
 g++ -std=c++17 -O2 -Wall -Wextra -Werror tests/RootLayout.cpp -lcrypto -o /path/to/owned-scratch/rootlayout
 /path/to/owned-scratch/rootlayout
 python3 tests/check_split_persistence.py /path/to/owned-scratch
+python3 tests/check_takeover_preflight.py /path/to/owned-scratch
 ```

@@ -927,6 +927,19 @@ static bool hostBringUp (const char **why)
   cacheCivac (gHost.virt, kDmaBytes);
   uint32_t report[3] = { 0, 0, 0 };
   gRootDiagnostic.stage = "SMMU and request list";
+  // Refuse an incompatible firmware SMMU state before stopping its queue.
+  // smmuBypassStream revalidates immediately before configuring the context.
+  uintptr_t smmu = mapPhys (0x15000000ULL, 0xd0000, gHost.smmuMap);
+  if (!smmu) {
+    *why = "SMMU preflight map";
+    return false;
+  }
+  UfsSmmuPlan plan = planUfsSmmu (0x60, gHost.phys, kDmaBytes,
+    [smmu](unsigned offset) { return read32 (smmu, offset); });
+  if (plan.error) {
+    *why = plan.error;
+    return false;
+  }
   if (!hostStopQueue (why)) return false;
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, kDmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
