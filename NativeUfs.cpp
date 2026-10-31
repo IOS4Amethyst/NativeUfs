@@ -1015,6 +1015,9 @@ static uint32_t be32w (const uint8_t *at)
 // the partition, clear of the flashed root image plus a 4 MiB guard, and is at most a quarter of the partition.
 namespace {
 StoreGeometry gStoreGeometry;
+// The diagnostic log's region on split devices (root in unixnu): independent of
+// the Data store so logging works where persistence does not.
+StoreGeometry gLogGeometry;
 uint64_t gStoreRegionFirst, gStoreRegionBlocks;
 // The diagnostic log (sheng-log=1): always the last 32 MiB of userdata, so the Data store's place does not depend on logging.
 constexpr uint64_t kLogReserveBlocks = 8192;
@@ -1203,20 +1206,23 @@ static unsigned logMode (void)
 }
 
 // Returns 1 with the window's first absolute LBA and size in 4096-byte blocks, 0 on refusal (reason in *why, may be null).
+// The window is the last kLogReserveBlocks of whichever partition carries the root image (unixnu on a split device), so
+// Android's userdata is never written, even when the log is the only thing that needs the space.
 extern "C" int native_ufs_log_open (uint64_t *firstLba, uint64_t *blocks, const char **why)
 {
   const char *reason = "";
   int ok = 0;
+  const StoreGeometry &geo = gLogGeometry.valid ? gLogGeometry : gStoreGeometry;
   if (!logMode ()) reason = "off";
-  else if (!gStoreGeometry.valid || !gHost.ready) reason = "no root layout";
+  else if (!geo.valid || !gHost.ready) reason = "no root layout";
   else if (gLogRegionBlocks) reason = "already open";
   else {
-    uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
+    uint64_t partition = geo.last - geo.first + 1;
+    uint64_t imageBlocks = (geo.imageBytes + 4095) / 4096;
     if (reserveBlocks () < kLogReserveBlocks + kExportBlocks) reason = "reserve too small for the log";
     else if (partition - reserveBlocks () < imageBlocks + 1024) reason = "overlaps the root image";
     else {
-      uint64_t first = gStoreGeometry.last + 1 - kLogReserveBlocks;
+      uint64_t first = geo.last + 1 - kLogReserveBlocks;
       // One write window covers the export region and the log: [first - kExportBlocks, first + kLogReserveBlocks).
       if (!hostLogOpen (first - kExportBlocks, kExportBlocks + kLogReserveBlocks)) reason = "window refused";
       else {
@@ -2038,8 +2044,11 @@ bool NativeUfs::startRoot (IOService *provider)
     return false;
   }
   gStoreGeometry = rootStoreGeometry (*layout);
+  // The log may live in the root-image partition even when Data persistence is
+  // refused (split device), so it gets its own geometry.
+  gLogGeometry = rootLogGeometry (*layout);
   if (layout->rootIsUnixnu)
-    IOLog ("NativeUfs: split device: Data persistence and log/export disabled; no validated storage region\n");
+    IOLog ("NativeUfs: split device: Data persistence disabled; diagnostic log window is in unixnu\n");
   const char *names[4] = {};
   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {

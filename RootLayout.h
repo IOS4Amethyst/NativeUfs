@@ -34,6 +34,18 @@ struct StoreGeometry {
   uint32_t headerCrc, entriesCrc, entryCount;
 };
 
+// The diagnostic log needs a region even on a split device (root in unixnu),
+// where the Data store is deliberately disabled. Logging is read-only with
+// respect to the filesystems: it occupies the tail of the partition that
+// carries the root image, clear of that image plus a guard, and it never
+// touches Android's userdata.
+static inline StoreGeometry rootLogGeometry (const RootLayout &layout)
+{
+  if (layout.manifestStatus != 0) return {};
+  return { true, layout.rootFirst, layout.rootLast, layout.imageBytes, layout.gptEntriesLba,
+           layout.gptHeaderCrc, layout.gptEntriesCrc, layout.gptEntryCount };
+}
+
 static inline StoreGeometry rootStoreGeometry (const RootLayout &layout)
 {
   // ponytail: split-device persistence is disabled until a dedicated region
