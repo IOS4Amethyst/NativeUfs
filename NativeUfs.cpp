@@ -1802,7 +1802,8 @@ static void publishThread (void *, wait_result_t)
   } operations;
   UfsRootPublicationResult result = ufsPublishRootWindows (operations, gPublicationPlan);
   if (result.phase != UfsRootPhase::Complete) {
-    gRootDiagnostic.result = result.phase == UfsRootPhase::Start ? kIOReturnIOError : kIOReturnTimeout;
+    gRootDiagnostic.result = static_cast<uint32_t> (result.phase == UfsRootPhase::Start ?
+      kIOReturnIOError : kIOReturnTimeout);
     const char *reason = result.phase == UfsRootPhase::Start ? "root window service start failed" :
       (!strcmp (gPendingDevice[result.index]->windowLabel (), "SystemOS") ?
        "SystemOS signed volume not found" : "signed root window volume not found");
@@ -2126,8 +2127,8 @@ bool NativeUfs::startRoot (IOService *provider)
   IOFree (layout, sizeof (RootLayout));
   if (result.phase != UfsRootPhase::Complete) {
     gPending = 0;
-    gRootDiagnostic.result = result.phase == UfsRootPhase::Identity ? kIOReturnNotPrivileged :
-      result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError;
+    gRootDiagnostic.result = static_cast<uint32_t> (result.phase == UfsRootPhase::Identity ? kIOReturnNotPrivileged :
+      result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError);
     IOLog ("NativeUfs: root preparation failed phase=%u window=%u; nothing published\n",
            static_cast<unsigned> (result.phase), result.index);
     IOService::stop (provider);
