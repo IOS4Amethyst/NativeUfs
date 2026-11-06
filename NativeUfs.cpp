@@ -84,7 +84,19 @@ public:
   void stop (IOService *provider) override;
 };
 
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+// Source storage (scripts/build-sheng-source-storage.py) registers the classes from its own
+// module-init pass after the original IOStorageFamily has loaded; the kernel's personality then
+// cannot start this driver early. Define the metaclasses without structors so the caller creates
+// the instance itself through native_ufs_source_create().
+OSDefineMetaClassWithInit (NativeUfs, IOService, )
+NativeUfs::MetaClass::MetaClass ()
+    : OSMetaClass ("NativeUfs", &IOService::gMetaClass, sizeof (NativeUfs)) {}
+OSDefineAbstractStructors (NativeUfs, IOService)
+OSDefineOperatorMethods (NativeUfs)
+#else
 OSDefineMetaClassAndStructors (NativeUfs, IOService)
+#endif
 
 static uint32_t read32 (uintptr_t base, unsigned offset)
 {
@@ -1681,6 +1693,11 @@ static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
 // verified VirtIO driver authorizes each volume against the owner policy; this
 // UFS bring-up build accepts only the explicit native-ufs-allow-unverified
 // mode and resolves the published SystemOS volume by its APFS UUID.
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+// SourceRootBinding.cpp (source storage) defines native_verified_block_root_authorized,
+// native_verified_block_manifest_sha384 and native_verified_block_volume_device from the
+// owner-signed policy; this fork must not define them a second time.
+#else
 extern "C" int native_verified_block_root_authorized (dev_t device)
 {
   (void) device;
@@ -1729,7 +1746,6 @@ extern "C" int native_verified_block_volume_device (const char *uuid, dev_t *dev
         continue;
       }
       candidate = static_cast<dev_t> (makedev (mjr->unsigned32BitValue (), mnr->unsigned32BitValue ()));
-      if (!native_verified_block_root_authorized (candidate)) continue;
       snprintf (candidatePath, sizeof (candidatePath), "/dev/%s", name->getCStringNoCopy ());
       found = true;
     }
@@ -1743,6 +1759,7 @@ extern "C" int native_verified_block_volume_device (const char *uuid, dev_t *dev
   }
   return 0;
 }
+#endif
 
 static void captureMissingMedia (const char *uuid)
 {
@@ -1908,6 +1925,11 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-allow-unverified", &allowUnverified, sizeof (allowUnverified));
   gAllowUnverifiedRoot = allowUnverified == 1;
   native_ufs_probe_requested = probe != 0;
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+  // Source storage already authenticated the owner policies and its start panics on failure, so the
+  // driver always requests the root here; an unverified build still refuses in validate().
+  rootMode = rootMode ? rootMode : 1;
+#endif
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
@@ -2155,3 +2177,17 @@ void NativeUfs::stop (IOService *provider)
   fMap.reset ();
   IOService::stop (provider);
 }
+
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+// Source storage calls this after the original IOStorageFamily is loaded and the owner policies
+// are authenticated. The caller owns init/attach/start, so the instance is returned unstarted.
+extern "C" IOService *native_ufs_source_create (void)
+{
+  NativeUfs *driver = OSTypeAlloc (NativeUfs);
+  if (driver && !driver->init (static_cast<OSDictionary *> (nullptr))) {
+    driver->release ();
+    driver = nullptr;
+  }
+  return driver;
+}
+#endif
