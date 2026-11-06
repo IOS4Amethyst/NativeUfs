@@ -6,6 +6,12 @@
 #include <IOKit/storage/IOBlockStorageDevice.h>
 #include <libkern/crypto/sha2.h>
 #include <vm/vm_kern.h>
+// xnu 12377 turns the KERNEL_PRIVATE branch of vm_kern.h into an #else of XNU_KERNEL_PRIVATE, so a
+// kernel build that defines both loses every kmem_* declaration. The full interface, including the
+// flag-taking kmem_alloc, lives in vm_kern_xnu.h under XNU_KERNEL_PRIVATE.
+#if XNU_KERNEL_PRIVATE
+#include <vm/vm_kern_xnu.h>
+#endif
 #include <vm/vm_map.h>
 #include <mach/mach_vm.h>
 #include <sys/param.h>
@@ -1450,9 +1456,8 @@ bool NativeUfsBlock::configureVerification ()
   }
   verifiedStorageBytes = tableBytes + 4096;
   gRootDiagnostic.stage = "policy allocation";
-  // The kext-visible kmem_alloc() takes no flags: xnu 12377 keeps kma_flags_t and KMA_* in the
-  // kernel-private vm_kern_xnu.h. A public three-argument allocation is what this adapter can use.
-  if (kmem_alloc (kernel_map, &verifiedStorage, verifiedStorageBytes) != KERN_SUCCESS) {
+  if (kmem_alloc (kernel_map, &verifiedStorage, verifiedStorageBytes,
+                  static_cast<kma_flags_t> (KMA_KOBJECT | KMA_DATA), VM_KERN_MEMORY_SECURITY) != KERN_SUCCESS) {
     return false;
   }
   memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
@@ -1460,7 +1465,7 @@ bool NativeUfsBlock::configureVerification ()
   memcpy (key, verified_root_key, VR_KEY_BYTES);
   gRootDiagnostic.stage = "policy read-only protection";
   // xnu 12377 drops vm_map_protect() from the exported vm_map.h; mach_vm_protect() is the
-  // exported equivalent (the same call Apple's own 12377 signature-cache does uses).
+  // exported equivalent, and the call Apple's own 12377 signature-cache code makes.
   if (mach_vm_protect (kernel_map, verifiedStorage, verifiedStorageBytes,
                        FALSE, VM_PROT_READ) != KERN_SUCCESS) {
     return false;
