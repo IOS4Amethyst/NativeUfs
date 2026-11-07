@@ -67,8 +67,15 @@ volatile uint32_t native_ufs_uic_status = 0;
 volatile uint32_t native_ufs_uic_result = 0;
 }
 
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+extern "C" IOService *native_ufs_source_create (void);
+#endif
+
 class NativeUfs : public IOService {
   OSDeclareDefaultStructors (NativeUfs)
+#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+  friend IOService * ::native_ufs_source_create (void);
+#endif
   OSSharedPtr<IOMemoryMap> fMap;
   OSSharedPtr<IOBufferMemoryDescriptor> fCmdDesc;
   void inspect (void);
@@ -1423,6 +1430,34 @@ volatile uint64_t native_ufs_verify_ticks = 0, native_ufs_read_ticks = 0;
 static inline uint64_t timerTicks (void) {uint64_t v; __asm__ volatile ("isb\n\tmrs %0, cntpct_el0" : "=r" (v)); return v;}
 
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
+// Data objects of a version 2 root manifest (offsets relative to the root partition: unixnu or userdata).
+static RootWindow gRootObject[4];
+static uint32_t gRootObjects;
+static uint64_t gRootObjectBase;
+
+// Read the hash table of a header-only policy from the root image object "<window>.vroot" into `table`.
+// The bytes are untrusted here; vr_open checks them against the digest in the signed header.
+static bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableBytes)
+{
+  char name[32];
+  if (snprintf (name, sizeof (name), "%s.vroot", window) >= static_cast<int> (sizeof (name))) return false;
+  const RootWindow *object = nullptr;
+  for (unsigned i = 0; i < gRootObjects; ++i)
+    if (!strcmp (gRootObject[i].name, name)) object = &gRootObject[i];
+  if (!object || object->size != tableBytes) return false;
+  uint64_t lba = (gRootObjectBase + object->offset) / 4096, done = 0;
+  while (done < tableBytes) {
+    uint64_t left = tableBytes - done;
+    uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
+    if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) return false;
+    uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
+    memcpy (table + done, gScratch, take);
+    done += take;
+    lba += blocks;
+  }
+  return true;
+}
+
 bool NativeUfsBlock::configureVerification ()
 {
   gRootDiagnostic.stage = "policy selection";
@@ -1460,6 +1495,19 @@ bool NativeUfsBlock::configureVerification ()
     gRootDiagnostic.stage = "no capacity-matching policy";
     return false;
   }
+  // A header-only policy carries its hash table in the root image instead of the boot image.
+  const bool headerOnly = manifestBytes == VR_HEADER_BYTES + VR_SIGNATURE_BYTES;
+  uint64_t hashBytes = 0;
+  if (headerOnly) {
+    uint64_t count = 0;
+    for (unsigned i = 0; i < 8; ++i) count |= static_cast<uint64_t> (manifest[32 + i]) << (8 * i);
+    if (!count || count > (UINT64_MAX - manifestBytes) / 32) {
+      gRootDiagnostic.stage = "policy header block count";
+      return false;
+    }
+    hashBytes = count * 32;
+    manifestBytes += hashBytes;
+  }
   gRootDiagnostic.stage = "policy storage";
   vm_size_t tableBytes = round_page (static_cast<vm_size_t> (manifestBytes));
   if (tableBytes < manifestBytes || tableBytes > UINT64_MAX - 4096) {
@@ -1472,7 +1520,16 @@ bool NativeUfsBlock::configureVerification ()
                   static_cast<kma_flags_t> (KMA_KOBJECT | KMA_DATA), VM_KERN_MEMORY_SECURITY) != KERN_SUCCESS) {
     return false;
   }
-  memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
+  if (headerOnly) {
+    memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, VR_HEADER_BYTES + VR_SIGNATURE_BYTES);
+    gRootDiagnostic.stage = "policy table object read";
+    if (!readPolicyTable (label, reinterpret_cast<uint8_t *> (verifiedStorage) + VR_HEADER_BYTES + VR_SIGNATURE_BYTES,
+                          hashBytes)) {
+      return false;
+    }
+  } else {
+    memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
+  }
   uint8_t *key = reinterpret_cast<uint8_t *> (verifiedStorage + tableBytes);
   memcpy (key, verified_root_key, VR_KEY_BYTES);
   gRootDiagnostic.stage = "policy read-only protection";
@@ -2076,6 +2133,9 @@ bool NativeUfs::startRoot (IOService *provider)
     return false;
   }
   gStoreGeometry = rootStoreGeometry (*layout);
+  gRootObjects = layout->objects;
+  for (unsigned i = 0; i < layout->objects; ++i) gRootObject[i] = layout->object[i];
+  gRootObjectBase = layout->rootFirst * 4096ULL;
   // The log may live in the root-image partition even when Data persistence is
   // refused (split device), so it gets its own geometry.
   gLogGeometry = rootLogGeometry (*layout);
@@ -2183,7 +2243,13 @@ void NativeUfs::stop (IOService *provider)
 // are authenticated. The caller owns init/attach/start, so the instance is returned unstarted.
 extern "C" IOService *native_ufs_source_create (void)
 {
-  NativeUfs *driver = OSTypeAlloc (NativeUfs);
+  // The metaclass is abstract under the source API (its alloc() returns nullptr so the kernel's
+  // personality cannot instantiate the driver), so OSTypeAlloc cannot be used here. Construct
+  // the instance as the default structors would: base constructor, then instanceConstructed().
+  NativeUfs *driver = new NativeUfs (&NativeUfs::gMetaClass);
+  if (driver) {
+    NativeUfs::gMetaClass.instanceConstructed ();
+  }
   if (driver && !driver->init (static_cast<OSDictionary *> (nullptr))) {
     driver->release ();
     driver = nullptr;
