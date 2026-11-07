@@ -1029,6 +1029,12 @@ static uint32_t be32w (const uint8_t *at)
 }
 
 #include "RootLayout.h"
+
+// Data objects of a version 2 root manifest (offsets relative to the root partition: unixnu or userdata).
+// Recorded by startRoot in every build; only the verified build reads them (policy hash tables).
+static RootWindow gRootObject[4] __attribute__((unused));
+static uint32_t gRootObjects __attribute__((unused));
+static uint64_t gRootObjectBase __attribute__((unused));
 #include "RootWindowRead.h"
 #include "RootPublication.h"
 
@@ -1430,11 +1436,6 @@ volatile uint64_t native_ufs_verify_ticks = 0, native_ufs_read_ticks = 0;
 static inline uint64_t timerTicks (void) {uint64_t v; __asm__ volatile ("isb\n\tmrs %0, cntpct_el0" : "=r" (v)); return v;}
 
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
-// Data objects of a version 2 root manifest (offsets relative to the root partition: unixnu or userdata).
-static RootWindow gRootObject[4];
-static uint32_t gRootObjects;
-static uint64_t gRootObjectBase;
-
 // Read the hash table of a header-only policy from the root image object "<window>.vroot" into `table`.
 // The bytes are untrusted here; vr_open checks them against the digest in the signed header.
 static bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableBytes)
